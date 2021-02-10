@@ -1,0 +1,627 @@
+-----------------------------------------------
+-- Data Ingestion and Processing Case Study --
+-----------------------------------------------
+
+ADD JAR /opt/cloudera/parcels/CDH/lib/hive/lib/hive-hcatalog-core-1.1.0-cdh5.11.2.jar;
+
+-- Creating a new database 
+create database if not exists nyc_db;
+
+use nyc_db;
+
+-- Dropping the table 'nyc_taxi_data' if it exists
+drop table if exists nyc_taxi_data;
+
+-- Creating an external table 'nyc_taxi_data'
+create external table if not exists nyc_taxi_data ( 
+        VendorID int ,
+        tpep_pickup_datetime timestamp,
+        tpep_dropoff_datetime timestamp,
+        Passenger_count int,
+        Trip_distance double,
+        RateCodeID int,
+        Store_and_fwd_flag string,
+        PULocationID int,
+        DOLocationID int,
+        Payment_type int,
+        Fare_amount double,
+        Extra double,
+        MTA_tax double,     
+        Tip_amount double,
+        Tolls_amount  double,
+        Improvement_surcharge double,
+        Total_amount double) 
+row format delimited fields terminated by ','
+location '/common_folder/nyc_taxi_data/'
+tblproperties ("skip.header.line.count"="1");
+
+-- Checking if the data has been loaded successfully into the HIVE environment.
+select * from nyc_taxi_data limit 10;
+
+-- The data has been loaded successfully
+
+-- Checking the total number of rows in the table
+select count(*) as Number_of_Records from nyc_taxi_data;
+
+-- There are a total of 1174569 rows
+
+-----------------------------------------------
+-- Basic Data Quality Checks
+-----------------------------------------------
+
+-- 1. Checking how many records each TPEP provider has provided
+
+select (
+    case VendorID
+        when 1 then 'Creative Moblie Technologies,LLC'
+        when 2 then 'VeriFone Inc.' 
+    end) as TPEP_Provider,
+    count(*) as Count_of_trips 
+from nyc_taxi_data 
+group by VendorID;
+
+-- OBSERVATION:
+-- Creative Moblie Technologies,LLC provided 5,27,386 records
+-- VeriFone Inc. provided 6,47,183 records
+
+----------------------------------------------------------------------------------------------
+
+-- 2. Checking if the data is only for the months of November and December 2017
+-- ASSUMPTION: We will also assume that pickups which happen on 31st December 2017
+-- with dropoff happening on 1st January 2018 are also valid records and will fall
+-- in the list of records for November/December 2017
+
+select count(*) as Number_of_Records
+from nyc_taxi_data
+where substr(tpep_pickup_datetime, 1, 7) not in ('2017-11','2017-12')
+or datediff(to_date(tpep_dropoff_datetime),to_date(tpep_pickup_datetime)) not in (0,1);
+
+-- OBSERVATION:
+-- We can see that there are 15 inconsistent records.
+
+
+-- We will have to remove these erroneous records before we proceed with Analysis - I and II
+
+----------------------------------------------------------------------------------------------
+
+-- 3. Checking which vendor is doing a bad job in providing the records by going through all the columns
+
+-----------------------------------------------
+
+-- Checking for NULL values in the tpep_pickup_datetime column
+
+select count(*) from nyc_taxi_data where tpep_pickup_datetime is null;
+
+-- OBSERVATION:
+-- There are no rows where tpep_pickup_datetime is NULL
+
+-----------------------------------------------
+
+-- Checking for NULL values in the tpep_dropoff_datetime column
+
+select count(*) from nyc_taxi_data where tpep_dropoff_datetime is null;
+
+-- OBSERVATION:
+-- There are no rows where tpep_dropoff_datetime is NULL
+
+-----------------------------------------------
+
+-- Checking if there are any records where Pickup datetime comes after Dropoff datetime
+
+select count(*) as Number_of_Records
+from nyc_taxi_data
+where unix_timestamp(tpep_pickup_datetime) > unix_timestamp(tpep_dropoff_datetime);
+
+-- OBSERVATION:
+-- We can see that there are 73 records where the Pickup datetime comes after Dropoff datetime
+-- These records will have to be removed
+
+-----------------------------------------------
+
+-- Checking if there are any records where Pickup datetime is same as Dropoff datetime
+
+select count(*) as Number_of_Records
+from nyc_taxi_data
+where unix_timestamp(tpep_pickup_datetime) = unix_timestamp(tpep_dropoff_datetime);
+
+-- OBSERVATION:
+-- We can see that there are 6482 records where the Pickup datetime is same as Dropoff datetime
+-- These records will have to be removed
+
+-----------------------------------------------
+
+-- Checking the Passenger_count column to see if there are any erroneous values
+
+-- ASSUMPTION: Valid range: 1 through 6 
+-- A maximum of four passengers can ride in traditional cabs
+-- There are also some five passenger cabs that look more like minivans. 
+-- A child under 7 is allowed to sit on a passenger's lap in the rear seat in addition to the passenger limit.
+-- Hence the passenger limit is assumed to be 5 + 1 child
+-- We are also going to assume a minimum of 1 passenger to be riding the taxi
+
+select VendorID, Passenger_count, count(*) as Number_of_Records
+from nyc_taxi_data 
+where passenger_count  < 1 or passenger_count > 6 
+group by VendorID, Passenger_count
+order by VendorID, Passenger_count desc;
+
+-- OBSERVATION:
+-- Creative Mobile Technologies,LLC has recorded 6814 trips of invalid passsenger counts
+-- VeriFone Inc. has recorded 26 trips of of invalid passsenger counts
+-- These 6840 records with invalid passenger counts have to be removed
+
+-----------------------------------------------
+
+-- Checking the Trip_distance column to see if there are any erroneous values
+-- ASSUMPTION: NYC taxis have an upper limit of 100 miles per trip
+-- For the purpose of this assignment, we can also conclude that records having
+-- Trip_distance as 0 are erroneous records
+
+select VendorID, Trip_distance as Distance, count(Trip_distance) as Number_of_Records 
+from nyc_taxi_data 
+where Trip_distance == 0 or Trip_distance > 100
+group by VendorID, Trip_distance
+order by VendorID;
+
+-- OBSERVATION:
+-- Creative Mobile Technologies, LLC have recorded 4218 trips of invalid distance
+-- Verifone Inc. has recorded 3187 trips of invalid distance
+-- These 7405 records of invalid distance to be removed
+
+-----------------------------------------------
+
+-- Checking the RateCodeID column to see if there are any erroneous values
+
+select VendorID, RateCodeID, count(*) as Number_of_Records from nyc_taxi_data 
+where RateCodeID < 1 or RateCodeID > 6
+group by VendorID, RateCodeID
+order by VendorID, RateCodeID;
+
+-- OBSERVATION:
+-- Creative Mobile Technologies, LLC has recorded 8 trips of invalid RateCodeID
+-- Verifone Inc. has recorded 1 trip of invalid RateCodeID
+-- These 9 records of invalid RateCodeID to be removed
+
+-----------------------------------------------
+
+-- Checking the Store_and_fwd_flag column to see if there are any erroneous values
+
+select VendorID, Store_and_fwd_flag, count(*) as Number_of_Records from nyc_taxi_data 
+where Store_and_fwd_flag not in ('Y','N')
+group by VendorID, Store_and_fwd_flag
+order by VendorID, Store_and_fwd_flag;
+
+-- OBSERVATION:
+-- There are no records with erroneous values in Store_and_fwd_flag
+
+-----------------------------------------------
+
+-- Checking for NULL values in PULocationID column
+
+select count(*) as Number_of_Records from nyc_taxi_data where PULocationID is null;
+
+-- OBSERVATION:
+-- There are no rows where PULocationID is NULL
+
+-----------------------------------------------
+
+-- Checking for NULL values in DOLocationID column
+
+select count(*) as Number_of_Records from nyc_taxi_data where DOLocationID is null;
+
+-- OBSERVATION:
+-- There are no rows where DOLocationID is NULL
+
+-----------------------------------------------
+
+-- Checking the Payment_type column to see if there are any erroneous values
+
+select VendorID, Payment_type, count(*) as Number_of_Records 
+from nyc_taxi_data
+where Payment_type not in (1,2,3,4,5,6)
+group by VendorID, Payment_type
+order by VendorID, Payment_type;
+
+-- OBSERVATION:
+-- There are no records with erroneous values in Payment_type
+
+-----------------------------------------------
+
+-- Checking the Fare_amount column to see if there are any negative or zero amount
+-- For the purpose of this assignment, we will consider negative and zero fare amount
+-- as errorneous records
+
+select VendorID, count(*) as Number_of_Records 
+from nyc_taxi_data 
+where Fare_amount <= 0
+group by VendorID
+order by VendorID;
+
+-- OBSERVATION:
+-- Creative Mobile Technologies, LLC has recorded 231 trips with erroneous fare amounts
+-- Verifone Inc has recorded 639 trips with erroneous fare amounts
+-- These records will have to be removed
+
+-----------------------------------------------
+
+-- Checking the Extra column to see if there are any erroneous values
+-- The correct values for this column are $0, $0.50 and $1. Anything other
+-- than this can be considered as erroneous records
+
+select VendorID, count(Extra) as Number_of_Records from nyc_taxi_data 
+where Extra not in (0, 0.5, 1)
+group by VendorID
+order by VendorID;
+
+-- OBSERVATION:
+-- Creative Mobile Technologies, LLC has recorded 1823 trips of invalid Extra payments
+-- Verifone Inc has recorded 3033 trips of invalid Extra payments
+-- These records will have to be removed
+
+-----------------------------------------------
+
+-- Checking the MTA_tax column to see if there are any erroneous values
+-- The correct value for this column are $0 and $0.50. Anything other
+-- than this can be considered as erroneous records
+
+select VendorID, count(MTA_tax) as Number_of_Records from nyc_taxi_data 
+where MTA_tax not in (0, 0.5)
+group by VendorID
+order by VendorID;
+
+-- OBSERVATION:
+-- Creative Mobile Technologies, LLC has recorded 1 trip of invalid MTA_Tax payments
+-- Verifone Inc has recorded 547 trips of invalid MTA_Tax payments
+-- These records will have to be removed
+
+-----------------------------------------------
+
+-- Checking the Tip_amount column to see if there are any negative amount
+-- For the purpose of this assignment, we will consider negative tip amount
+-- as errorneous records
+
+select VendorID, count(Tip_amount) as Number_of_Records from nyc_taxi_data 
+where Tip_amount < 0
+group by VendorID
+order by VendorID;
+
+-- OBSERVATION:
+-- Verifone Inc has recorded 4 trips of negative tip amount, which is not valid
+-- These records will have to be removed
+
+-----------------------------------------------
+
+-- Checking the Tolls_amount column to see if there are any negative amount
+-- For the purpose of this assignment, we will consider negative tolls amount
+-- as errorneous records
+-- ASSUMPTION: Tolls amount of more than $200 is considered as not feasible in one trip
+
+select VendorID, count(Tolls_amount) as Number_of_Records from nyc_taxi_data 
+where Tolls_amount < 0 or tolls_amount > 200
+group by VendorID
+order by VendorID;
+
+-- OBSERVATION:
+-- Creative Mobile Technologies, LLC has recorded 1 trip of invalid toll amount
+-- Verifone Inc has recorded 3 trips of invalid toll amount
+-- These records will have to be removed
+
+-----------------------------------------------
+
+-- Checking the Improvement_surcharge column to see if there are any erroneous values
+-- The correct value for this column  is $0.3. Anything other
+-- than this can be considered as erroneous records
+
+select VendorID, count(Improvement_surcharge) as Number_of_Records from nyc_taxi_data 
+where Improvement_surcharge != 0.3
+group by VendorID
+order by VendorID;
+
+-- OBSERVATION:
+-- Creative Mobile Technologies, LLC has recorded 61 trips of invalid Improvement_surcharge
+-- Verifone Inc has recorded 788 trips of invalid Improvement_surcharge
+-- These records will have to be removed
+
+-----------------------------------------------
+
+-- Checking the Total_amount column to see if there are any negative or zero amount
+-- For the purpose of this assignment, we will consider negative and zero total amount
+-- as errorneous records
+
+select VendorID, count(Total_amount) as Number_of_Records from nyc_taxi_data 
+where Total_amount <= 0
+group by VendorID
+order by VendorID;
+
+-- OBSERVATION:
+-- Creative Mobile Technologies, LLC has recorded 42 trips with erroneous total amounts
+-- Verifone Inc has recorded 639 trips with erroneous total amounts
+-- These records will have to be removed
+
+-----------------------------------------------
+
+-- FINAL ANALYSIS AFTER DATA QUALITY CHECKS:
+-- From the data quality checks we have run on all the columns, we can see 
+-- that the vendor VeriFone Inc. has provided data with lot of erroneous 
+-- values in the various columns.
+
+-----------------------------------------------
+-- Creating an ORC partitioned table for analysis
+-----------------------------------------------
+
+SET hive.exec.max.dynamic.partitions=100000;
+SET hive.exec.max.dynamic.partitions.pernode=100000;
+
+
+-- Dropping table nyc_taxi_partition_orc if it already exists
+drop table if exists nyc_taxi_partition_orc;
+
+-- Creating nyc_taxi_partition_orc table
+create external table if not exists nyc_taxi_partition_orc (
+        VendorID int ,
+        tpep_pickup_datetime timestamp,
+        tpep_dropoff_datetime timestamp,
+        Passenger_count int,
+        Trip_distance double,
+        RateCodeID int,
+        Store_and_fwd_flag string,
+        PULocationID int,
+        DOLocationID int,
+        Payment_type int,
+        Fare_amount double,
+        Extra double,
+        MTA_tax double,     
+        Tip_amount double,
+        Tolls_amount  double,
+        Improvement_surcharge double,
+        Total_amount double) partitioned by (yr int, mnth int)
+stored as orc location '/user/hive/warehouse/nyc_taxi_orc'
+tblproperties ("orc.compress"="SNAPPY");
+
+-----------------------------------------------
+
+-- Writing the data from external table nyc_taxi_data to nyc_taxi_partition_orc
+insert overwrite table nyc_taxi_partition_orc partition(yr, mnth)
+select VendorID, tpep_pickup_datetime, tpep_dropoff_datetime, Passenger_count, Trip_distance, 
+RateCodeID, Store_and_fwd_flag, PULocationID, DOLocationID, Payment_type, Fare_amount, Extra, 
+MTA_tax, Tip_amount, Tolls_amount, Improvement_surcharge, Total_amount, year(tpep_pickup_datetime) as yr, 
+month(tpep_pickup_datetime) as mnth
+from nyc_taxi_data 
+where unix_timestamp(tpep_pickup_datetime) < unix_timestamp(tpep_dropoff_datetime)
+and Passenger_count between 1 and 6 
+and RateCodeID between 1 and 6 
+and Trip_distance > 0 
+and Fare_amount > 0 
+and Extra in (0.5, 1, 0)
+and MTA_tax in (0.5, 0)
+and Tip_amount >= 0
+and Total_amount > 0 
+and Tolls_amount >= 0 
+and substr(tpep_pickup_datetime, 1, 7) in ('2017-11','2017-12')
+and datediff(to_date(tpep_dropoff_datetime),to_date(tpep_pickup_datetime)) in (0,1);
+
+
+-- Checking if the data has been loaded successfully into the ORC partitioned table.
+select * from nyc_taxi_partition_orc limit 10;
+
+-- The data has been loaded successfully
+
+-----------------------------------------------
+
+-- Checking the total number of rows in the ORC partitioned table
+select count(*) as Number_of_Records from nyc_taxi_partition_orc;
+
+-- OBSERVATION:
+-- There are a total of 1153601 rows
+
+
+-----------------------------------------------
+-- Analysis-I
+-----------------------------------------------
+
+-- 1. Comparing the overall average fare per trip for November and December
+
+
+select round(avg(Fare_amount), 2) as Average_Fare, mnth as Month
+from nyc_taxi_partition_orc 
+group by mnth
+order by mnth;
+
+-- OBSERVATION:
+-- Average fare per trip for November: $12.91
+-- Average fare per trip for December: $12.7
+
+-- The average fare per trip for November is higher than the average fare per trip for December
+
+----------------------------------------------------------------------------------------------
+
+-- 2. Checking the number of trips made by each level of ‘Passenger_count’
+
+
+select Passenger_count as Number_of_Passengers, count(*) as Number_of_Records
+from nyc_taxi_partition_orc
+group by Passenger_count
+order by Passenger_count;
+
+-- OBSERVATION:
+-- We can see that around 817034 number of passengers travelled solo indicating 
+-- that most people prefer to travel solo rather than with other passengers
+-- Travelling as couples is comparatively lesser than solo travels.
+-- Trips in groups of 3 or more are even lesser 
+
+----------------------------------------------------------------------------------------------
+
+-- 3. Finding the most preferred mode of payment
+
+
+select Payment_type, count(*) as Number_of_Records 
+from nyc_taxi_partition_orc
+group by Payment_type 
+order by Number_of_Records desc;
+
+-- OBSERVATION:
+-- Number of Credit Card transactions: 779150
+-- Number of Cash transactions: 368659
+
+-- We can see that the most preferred mode of payment are through credit cards
+
+----------------------------------------------------------------------------------------------
+
+-- 4. Finding the average tip paid per trip
+
+
+select round(avg(Tip_amount),2) as avg_tip,
+percentile_approx(Tip_amount, 0.25) as 25th_percentile_tip,  
+percentile_approx(Tip_amount, 0.50) as 50th_percentile_tip,
+percentile_approx(Tip_amount, 0.75) as 75th_percentile_tip
+from nyc_taxi_partition_orc;
+
+-- OBSERVATION:
+-- The average tip comes to around $1.83 and the 50th percentile of the tip comes
+-- to around $1.35. We can conclude that the average tip is not representative 
+-- of the central tendency of the tip amount paid
+-- The 25th and 75th percentiles of the tip amount are $0.00 and $2.45 respectively
+
+----------------------------------------------------------------------------------------------
+
+-- 5. Finding the fraction of total trips that have an extra charge levied on them
+
+select Type, count_rec/sum(count_rec) over() from 
+(
+select (
+    case 
+        when extra=0 then 'No_Extra_Charges'
+        when extra>0 then 'Extra_Charges'
+    end) as Type, 
+count(1) as count_rec
+from nyc_taxi_partition_orc 
+group by (
+    case 
+        when extra=0 then 'No_Extra_Charges'
+        when extra>0 then 'Extra_Charges'
+    end)
+) a;
+
+-- OBSERVATION:
+-- Fraction of total trips that have extra charges levied on them: 46.15 %
+-- Fraction of total trips that have no extra charges levied on them: 53.85 %
+
+-----------------------------------------------
+-- Analysis-II
+-----------------------------------------------
+
+-- 1. Finding the correlation between the number of passengers on any given trip and the tip paid per trip
+
+
+select round(corr(Passenger_count, Tip_amount), 4) as Correlation, 
+avg(case 
+        when Passenger_count = 1 then Tip_amount 
+        else null 
+    end) as Solo_Tip, 
+avg(case 
+        when Passenger_count != 1 then Tip_amount 
+        else null 
+    end) as Group_Tip
+from nyc_taxi_partition_orc;
+
+-- OBSERVATION:
+-- Correlation between Passenger Count and Tip Amount is -0.0053
+-- This indicates there is no correlation between the number of passengers and the tip amount
+
+-- Average Tip for Solo Trips: $1.84
+-- Avrage Tip for Group Trips: $1.80
+-- We observe that there is not a significant difference between the above values
+
+----------------------------------------------------------------------------------------------
+
+-- 2. Calculating the percentage share of each bucket with the data divivded into five segments of ‘tip paid’
+
+
+select tip_bucket, round(count(*)/cast(sum(count(*)) over() as float) * 100, 2) as Percentage_share
+from (select 
+        case 
+            when Tip_amount >= 0 and Tip_amount < 5 then 'Between 0 and 5'
+            when Tip_amount >= 5 and Tip_amount < 10 then 'Between 5 and 10'
+            when Tip_amount >= 10 and Tip_amount < 15 then 'Between 10 and 15'
+            when Tip_amount >= 15 and Tip_amount < 20 then 'Between 15 and 20'
+            when Tip_amount >= 20 then 'Greater than or equal to 20'
+        end as tip_bucket from nyc_taxi_partition_orc) a
+group by tip_bucket
+order by Percentage_share desc;
+
+-- OBSERVATION:
+-- We can see that a large percentage of transactions (92.4 %) 
+-- fall into the category of Tip Amount between $0 - $5
+
+----------------------------------------------------------------------------------------------
+
+-- 3. Finding the month that has a greater average ‘speed’
+
+
+select mnth as Month,
+round(avg((Trip_distance/((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600))),2) as Average_speed
+from nyc_taxi_partition_orc
+group by mnth
+order by mnth;
+
+-- OBSERVATION:
+-- Average speed for November is 10.97 miles per hour
+-- Average speed for December is 11.07 miles per hour
+
+-- We can see that the average speed for December is more than the average speed for November
+----------------------------------------------------------------------------------------------
+
+-- 4. Analysing the average speed of the most happening days of the year
+
+
+-- Overall Average Speed
+
+select
+round(avg((Trip_distance/((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600))),2) as Average_speed
+from nyc_taxi_partition_orc;
+
+-- The overall average speed is 11.02 miles per hour
+
+-----------------------------------------------
+
+-- Average Speed on Christmas Day
+
+select
+round(avg((Trip_distance/((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600))),2) as Christmas_speed
+from nyc_taxi_partition_orc
+where month(tpep_pickup_datetime) = 12 and day(tpep_pickup_datetime) = 25;
+
+-- The average speed on Christmas Day is 15.27 miles per hour
+
+-----------------------------------------------
+
+-- Average Speed on New Year's Eve
+
+select
+round(avg((Trip_distance/((unix_timestamp(tpep_dropoff_datetime) - unix_timestamp(tpep_pickup_datetime))/3600))),2) as NewYearEve_speed
+from nyc_taxi_partition_orc
+where month(tpep_pickup_datetime) = 12 and day(tpep_pickup_datetime) = 31;
+
+-- The average speed on New Year's Eve is 13.24 miles per hour
+
+-- OBSERVATION:
+-- The overall average speed of the trips for the months of November and December of 2017 is 11.02 MPH
+-- We can see that the average speed on Christmas Day and New Year's Eve are greater than the overall average
+
+
+-----------------------------------------------
+-- Recommendations
+-----------------------------------------------
+
+-- From the Exploratory Data Analysis we did as part of this assignment, we could see that 
+-- even though both the TPEP Providers, Creative Moblie Technologies,LLC and VeriFone Inc., 
+-- have provided a dataset with multiple erroneous records, the number of erroneous records 
+-- provided by VeriFone Inc. is much larger.
+-- This could partly be because they are following conventions which are different from
+-- the standard conventions.
+-- We need to educate VeriFone Inc. of the inconsistencies and discrepancies in the data 
+-- so that in the future, the data can be made to conform to the standard conventions. 
+
+-- Another observation from the analysis we have done is that there are changes happening in the 
+-- data when the festive season arrives. This is a clear indication that we should recommended 
+-- retraining the models that would be used for any predictive analysis.
